@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from kornia.geometry.depth import depth_to_3d
 
 
+# R
 def euler2mat(angle):
     """Convert euler angles to rotation matrix.
      Reference: https://github.com/pulkitag/pycaffe-utils/blob/master/rot_utils.py#L174
@@ -42,6 +43,7 @@ def euler2mat(angle):
     return rotMat
 
 
+# R
 def quat2mat(quat):
     """Convert quaternion coefficients to rotation matrix.
     Args:
@@ -66,6 +68,7 @@ def quat2mat(quat):
     return rotMat
 
 
+# [R | T]
 def pose_vec2mat(vec, rotation_mode='euler'):
     """
     Convert 6DoF parameters to transformation matrix.
@@ -88,9 +91,9 @@ def inverse_warp(img, depth, ref_depth, pose, intrinsics, padding_mode='zeros'):
     """
     Inverse warp a source image to the target image plane.
     Args:
-        img: the source image (where to sample pixels) -- [B, 3, H, W]
-        depth: depth map of the target image -- [B, 1, H, W]
-        ref_depth: the source depth map (where to sample depth) -- [B, 1, H, W] 
+        img: Is, the source image (where to sample pixels) -- [B, 3, H, W]
+        depth: depth_t, depth map of the target image -- [B, 1, H, W]
+        ref_depth: depth_s, the source depth map (where to sample depth) -- [B, 1, H, W]
         pose: 6DoF pose parameters from target to source -- [B, 6]
         intrinsics: camera intrinsic matrix -- [B, 3, 3]
     Returns:
@@ -100,24 +103,41 @@ def inverse_warp(img, depth, ref_depth, pose, intrinsics, padding_mode='zeros'):
     """
     B, _, H, W = img.size()
 
+    # 这一部分就是用 It 的 depth_t 与 T(t->s) 得到坐标变换矩阵 pix_coords
+    # [R | T]
     T = pose_vec2mat(pose)  # [B,3,4]
-    P = torch.matmul(intrinsics, T)[:, :3, :]
 
-    world_points = depth_to_3d(depth, intrinsics) # B 3 H W
-    world_points = torch.cat([world_points, torch.ones(B,1,H,W).type_as(img)], 1)
-    cam_points = torch.matmul(P, world_points.view(B, 4, -1))
+    # M = K·[R | T]
+    M = torch.matmul(intrinsics, T)[:, :3, :]   # [B,3,4]
 
+    # 用 depth_to_3d 输入 depth 与内参就能还原三维坐标，会自动获取 depth 的 h，w，不需要自己创建像素坐标矩阵
+    world_points = depth_to_3d(depth, intrinsics)   # [B, (x,y,d), H, W]   [B,3,H,W]
+
+    # 把三维点的欧式坐标变换成齐次坐标
+    world_points = torch.cat([world_points, torch.ones(B,1,H,W).type_as(img)], 1)   # [B, (x,y,z,1), H, W]   [B,4,H,W]
+
+    # p = M·P = (m1·P, m2·P, m3·P)  得到目标二维点齐次坐标
+    cam_points = torch.matmul(M, world_points.view(B, 4, -1))   # [B, (m1·P, m2·P, m3·P), HW]   [B,3,HW]
+
+    # (m1·P, m2·P, m3·P) / m3·P = (m1·P/m3·P, m2·P/m3·P, 1) ->  (u, v)
     pix_coords = cam_points[:, :2, :] / (cam_points[:, 2, :].unsqueeze(1) + 1e-7)
-    pix_coords = pix_coords.view(B, 2, H, W)
-    pix_coords = pix_coords.permute(0, 2, 3, 1)
-    pix_coords[..., 0] /= W - 1
-    pix_coords[..., 1] /= H - 1
+    pix_coords = pix_coords.view(B, 2, H, W)    # [B,2,HW] -> [B,2,H,W]
+    pix_coords = pix_coords.permute(0, 2, 3, 1)  # [B, H, W, (u,v)]
+
+    # 标准化到 [-1,1] 的区间，得到坐标变换矩阵，为了后面使用 F.grid_sample
+    pix_coords[..., 0] /= W - 1     # u/(W-1)
+    pix_coords[..., 1] /= H - 1     # v/(H-1)
     pix_coords = (pix_coords - 0.5) * 2
 
+    # [B, m3·P, H, W]
     computed_depth = cam_points[:, 2, :].unsqueeze(1).view(B, 1, H, W)
 
-    projected_img = F.grid_sample(img, pix_coords, padding_mode=padding_mode, align_corners=False)
-    projected_depth = F.grid_sample(ref_depth, pix_coords, padding_mode=padding_mode, align_corners=False)
+    # Is == wraping ==> ^Is ~ It
+    # 这里就是用双线性插值
+    projected_img = F.grid_sample(img, pix_coords, padding_mode=padding_mode, align_corners=False)   # [B, 3, H, W]
+
+    # 把 Is 的 depth 也 wrap 了,        depth_s ==> ^depth_s ~ depth_t
+    projected_depth = F.grid_sample(ref_depth, pix_coords, padding_mode=padding_mode, align_corners=False)   # [B, 1, H, W]
 
     return projected_img, projected_depth, computed_depth
 
@@ -127,10 +147,11 @@ def inverse_rotation_warp(img, rot, intrinsics, padding_mode='zeros'):
     B, _, H, W = img.size()
 
     R = euler2mat(rot)  # [B, 3, 3]
-    P = torch.matmul(intrinsics, R)
+    Mr = torch.matmul(intrinsics, R)
 
-    world_points = depth_to_3d(torch.ones(B, 1, H, W).type_as(img), intrinsics) # B 3 H W
-    cam_points = torch.matmul(P, world_points.view(B, 3, -1))
+    # depth = 1
+    world_points = depth_to_3d(torch.ones(B, 1, H, W).type_as(img), intrinsics)   # B 3 H W
+    cam_points = torch.matmul(Mr, world_points.view(B, 3, -1))
 
     pix_coords = cam_points[:, :2, :] / (cam_points[:, 2, :].unsqueeze(1) + 1e-7)
     pix_coords = pix_coords.view(B, 2, H, W)

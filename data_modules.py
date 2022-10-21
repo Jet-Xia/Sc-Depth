@@ -7,6 +7,8 @@ from datasets.train_folders import TrainFolder
 from datasets.validation_folders import ValidationSet
 
 
+# DataLoader Module
+# trainer.fit(Model, DataLoader)
 class VideosDataModule(LightningDataModule):
 
     def __init__(self, hparams):
@@ -15,6 +17,7 @@ class VideosDataModule(LightningDataModule):
         self.training_size = get_training_size(hparams.dataset_name)
 
         # data loader
+        # 训练预处理
         self.train_transform = custom_transforms.Compose([
             custom_transforms.RandomHorizontalFlip(),
             custom_transforms.RandomScaleCrop(),
@@ -22,6 +25,7 @@ class VideosDataModule(LightningDataModule):
             custom_transforms.ArrayToTensor(),
             custom_transforms.Normalize()]
         )
+        #
         self.valid_transform = custom_transforms.Compose([
             custom_transforms.RescaleTo(self.training_size),
             custom_transforms.ArrayToTensor(),
@@ -31,8 +35,10 @@ class VideosDataModule(LightningDataModule):
     def prepare_data(self):
         pass
 
+    #
     def setup(self, stage=None):
 
+        # training dataset
         self.train_dataset = TrainFolder(
             self.hparams.hparams.dataset_dir,
             transform=self.train_transform,
@@ -42,6 +48,7 @@ class VideosDataModule(LightningDataModule):
             use_frame_index=self.hparams.hparams.use_frame_index
         )
 
+        # validatioin dataset
         if self.hparams.hparams.val_mode == 'depth':
             self.val_dataset = ValidationSet(
                 self.hparams.hparams.dataset_dir,
@@ -63,7 +70,9 @@ class VideosDataModule(LightningDataModule):
         print('{} samples found for training'.format(len(self.train_dataset)))
         print('{} samples found for validatioin'.format(len(self.val_dataset)))
 
+    # training dataloader
     def train_dataloader(self):
+        # 对整个 dataset 进行随机打乱顺序
         sampler = RandomSampler(self.train_dataset,
                                 replacement=True,
                                 num_samples=self.hparams.hparams.batch_size * self.hparams.hparams.epoch_size)
@@ -73,6 +82,7 @@ class VideosDataModule(LightningDataModule):
                           batch_size=self.hparams.hparams.batch_size,
                           pin_memory=True)
 
+    # validatioin dataloader
     def val_dataloader(self):
         return DataLoader(self.val_dataset,
                           shuffle=False,

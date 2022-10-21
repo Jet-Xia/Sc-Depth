@@ -14,6 +14,7 @@ class SC_Depth(LightningModule):
         self.save_hyperparameters()
 
         # model
+        # DepthNet(num_layers=18, pretrained=True)
         self.depth_net = DepthNet(self.hparams.hparams.resnet_layers)
         self.pose_net = PoseNet()
 
@@ -29,21 +30,28 @@ class SC_Depth(LightningModule):
         tgt_img, ref_imgs, intrinsics = batch
 
         # network forward
+        # { tgt_img 编号: d+i ;  ref_imgs 编号: (0+i-d开始 , 长度为 2d); tgt个数：len-2d}
+        # 对长度为 2d 的 ref_img 每一个都预测它的 depth
         tgt_depth = self.depth_net(tgt_img)
         ref_depths = [self.depth_net(im) for im in ref_imgs]
 
+        # 对长度为 2d 的 ref_img 每一个都与 tgt_img 预测一个 pose 和反向 pose_inv
         poses = [self.pose_net(tgt_img, im) for im in ref_imgs]
         poses_inv = [self.pose_net(im, tgt_img) for im in ref_imgs]
 
         # compute loss
+        # α，γ，β
         w1 = self.hparams.hparams.photo_weight
         w2 = self.hparams.hparams.geometry_weight
         w3 = self.hparams.hparams.smooth_weight
 
+        # 把预测出的 tgt 和 ref 的原图、depth、pose传进loss
         loss_1, loss_2 = LossF.photo_and_geometry_loss(tgt_img, ref_imgs, tgt_depth, ref_depths,
                                                        intrinsics, poses, poses_inv, self.hparams.hparams)
+        # smooth loss
         loss_3 = LossF.compute_smooth_loss(tgt_depth, tgt_img)
 
+        # L = α·Lp + γ·Lg + β·Ls
         loss = w1*loss_1 + w2*loss_2 + w3*loss_3
 
         # create logs
