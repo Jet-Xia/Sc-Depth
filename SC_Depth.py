@@ -1,12 +1,12 @@
+from math import floor
 import numpy as np
 import torch
 from pytorch_lightning import LightningModule
-
 import losses.loss_functions as LossF
 from models.DepthNet import DepthNet
 from models.PoseNet import PoseNet
 from visualization import *
-
+from kornia.filters import gaussian_blur2d
 
 class SC_Depth(LightningModule):
     def __init__(self, hparams):
@@ -14,10 +14,9 @@ class SC_Depth(LightningModule):
         self.save_hyperparameters()
 
         # model
-        # DepthNet(num_layers=18, pretrained=True)
         self.depth_net = DepthNet(self.hparams.hparams.resnet_layers)
         self.pose_net = PoseNet()
-
+    
     def configure_optimizers(self):
         optim_params = [
             {'params': self.depth_net.parameters(), 'lr': self.hparams.hparams.lr},
@@ -30,30 +29,34 @@ class SC_Depth(LightningModule):
         tgt_img, ref_imgs, intrinsics = batch
 
         # network forward
-        # { tgt_img 编号: d+i ;  ref_imgs 编号: (0+i-d开始 , 长度为 2d); tgt个数：len-2d}
-        # 对长度为 2d 的 ref_img 每一个都预测它的 depth
         tgt_depth = self.depth_net(tgt_img)
         ref_depths = [self.depth_net(im) for im in ref_imgs]
-
-        # 对长度为 2d 的 ref_img 每一个都与 tgt_img 预测一个 pose 和反向 pose_inv
+        
         poses = [self.pose_net(tgt_img, im) for im in ref_imgs]
         poses_inv = [self.pose_net(im, tgt_img) for im in ref_imgs]
 
         # compute loss
-        # α，γ，β
         w1 = self.hparams.hparams.photo_weight
         w2 = self.hparams.hparams.geometry_weight
         w3 = self.hparams.hparams.smooth_weight
 
-        # 把预测出的 tgt 和 ref 的原图、depth、pose传进loss
+        # bluring images for better initialization at the begining
+        if self.global_step < 50000:
+            K_sizes = [11, 9, 7, 5, 3]
+            k_size = K_sizes[floor(self.global_step/10000)]
+            sigma = 0.3 * ((k_size - 1) * 0.5 - 1) + 0.8
+            tgt_img = gaussian_blur2d(
+                tgt_img, [k_size, k_size], [sigma, sigma])
+            ref_imgs = [gaussian_blur2d(
+                img, [k_size, k_size], [sigma, sigma])
+                for img in ref_imgs]
+
         loss_1, loss_2 = LossF.photo_and_geometry_loss(tgt_img, ref_imgs, tgt_depth, ref_depths,
-                                                       intrinsics, poses, poses_inv, self.hparams.hparams)
-        # smooth loss
+                                                    intrinsics, poses, poses_inv, self.hparams.hparams)
         loss_3 = LossF.compute_smooth_loss(tgt_depth, tgt_img)
 
-        # L = α·Lp + γ·Lg + β·Ls
         loss = w1*loss_1 + w2*loss_2 + w3*loss_3
-
+        
         # create logs
         self.log('train/total_loss', loss)
         self.log('train/photo_loss', loss_1)
@@ -61,15 +64,14 @@ class SC_Depth(LightningModule):
         self.log('train/smooth_loss', loss_3)
 
         return loss
-
+        
     def validation_step(self, batch, batch_idx):
 
         if self.hparams.hparams.val_mode == 'depth':
             tgt_img, gt_depth = batch
             tgt_depth = self.depth_net(tgt_img)
-            errs = LossF.compute_errors(gt_depth, tgt_depth,
-                                        self.hparams.hparams.dataset_name)
-
+            errs = LossF.compute_errors(gt_depth, tgt_depth, self.hparams.hparams.dataset_name)
+            
             errs = {'abs_diff': errs[0], 'abs_rel': errs[1],
                     'a1': errs[6], 'a2': errs[7], 'a3': errs[8]}
 
@@ -78,27 +80,26 @@ class SC_Depth(LightningModule):
 
             tgt_depth = self.depth_net(tgt_img)
             ref_depths = [self.depth_net(im) for im in ref_imgs]
+        
             poses = [self.pose_net(tgt_img, im) for im in ref_imgs]
             poses_inv = [self.pose_net(im, tgt_img) for im in ref_imgs]
 
             loss_1, loss_2 = LossF.photo_and_geometry_loss(tgt_img, ref_imgs, tgt_depth, ref_depths,
-                                                           intrinsics, poses, poses_inv, self.hparams.hparams)
-            errs = {'photo_loss': loss_1.item()}
+                                                        intrinsics, poses, poses_inv, hparams=self.hparams.hparams)
+            errs = {'photo_loss': loss_1.item(), 'geometry_loss': loss_2.item()}
         else:
             print('wrong validation mode')
-
+   
         if self.global_step < 10:
             return errs
 
-        # plot
+        # plot 
         if batch_idx < 3:
-            vis_img = visualize_image(tgt_img[0])  # (3, H, W)
-            vis_depth = visualize_depth(tgt_depth[0, 0])  # (3, H, W)
-            stack = torch.cat([vis_img, vis_depth], dim=1).unsqueeze(
-                0)  # (1, 3, 2*H, W)
-            self.logger.experiment.add_images(
-                'val/img_depth_{}'.format(batch_idx), stack, self.current_epoch)
-
+            vis_img = visualize_image(tgt_img[0]) # (3, H, W)
+            vis_depth = visualize_depth(tgt_depth[0,0]) # (3, H, W)
+            stack = torch.cat([vis_img, vis_depth], dim=1).unsqueeze(0) # (3, 2*H, W)
+            self.logger.experiment.add_images('val/img_depth_{}'.format(batch_idx), stack, self.current_epoch)
+        
         return errs
 
     def validation_epoch_end(self, outputs):
@@ -109,7 +110,7 @@ class SC_Depth(LightningModule):
             mean_a1 = np.array([x['a1'] for x in outputs]).mean()
             mean_a2 = np.array([x['a2'] for x in outputs]).mean()
             mean_a3 = np.array([x['a3'] for x in outputs]).mean()
-
+            
             self.log('val_loss', mean_rel, prog_bar=True)
             self.log('val/abs_diff', mean_diff)
             self.log('val/abs_rel', mean_rel)
@@ -120,3 +121,4 @@ class SC_Depth(LightningModule):
         elif self.hparams.hparams.val_mode == 'photo':
             mean_pl = np.array([x['photo_loss'] for x in outputs]).mean()
             self.log('val_loss', mean_pl, prog_bar=True)
+  

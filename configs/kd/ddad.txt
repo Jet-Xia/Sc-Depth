@@ -1,0 +1,13 @@
+exp_name = ddad_sc_kd
+
+dataset_name = ddad
+
+model_version = v3p
+resnet_layers = 18
+KD = yes
+mask_rank_weight = 0.15
+
+lr = 1e-4
+batch_size = 1
+num_epochs = 100
+epoch_size = 4000

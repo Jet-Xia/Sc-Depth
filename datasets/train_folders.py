@@ -1,16 +1,32 @@
 import torch.utils.data as data
 import numpy as np
-from imageio.v2 import imread
+from imageio import imread
 from path import Path
 import random
-import os
 
 
 def load_as_float(path):
     return imread(path).astype(np.float32)
 
 
-# Training Dataset
+def generate_sample_index(num_frames, skip_frames, sequence_length):
+    sample_index_list = []
+    k = skip_frames
+    demi_length = (sequence_length-1)//2
+    shifts = list(range(-demi_length * k,
+                        demi_length * k + 1, k))
+    shifts.pop(demi_length)
+
+    if num_frames > sequence_length:
+        for i in range(demi_length * k, num_frames-demi_length * k):
+            sample_index = {'tgt_idx': i, 'ref_idx': []}
+            for j in shifts:
+                sample_index['ref_idx'].append(i+j)
+            sample_index_list.append(sample_index)
+
+    return sample_index_list
+
+
 class TrainFolder(data.Dataset):
     """A sequence data loader where the files are arranged in this way:
         root/scene_1/0000000.jpg
@@ -22,92 +38,87 @@ class TrainFolder(data.Dataset):
         transform functions must take in a list a images and a numpy array (usually intrinsics matrix)
     """
 
-    def __init__(self, root, train=True, sequence_length=3, transform=None, skip_frames=1, use_frame_index=False):
-        """
-        Args:
-            root: dataset path
-            train:
-            sequence_length: number of images for training 训练要用的图片数
-            transform: custom_transforms
-            skip_frames: jump sampling from video  连续帧数
-            use_frame_index: filter out static-camera frames in video
-        """
-
+    def __init__(self, root, sequence_length=3, transform=None, skip_frames=1,
+                 dataset='kitti', with_frame_index=False, with_pseudo_depth=False):
         np.random.seed(0)
         random.seed(0)
-
-        # 数据集路径
         self.root = Path(root)/'training'
-        scene_list_path = self.root/'train.txt' if train else self.root/'val.txt'
-        # train.txt 记录了图片名列表，folder 就是每个图片的文件名，将root拼接上每个folder
-
-        # root/scene_n
+        scene_list_path = self.root/'train.txt'
         self.scenes = [self.root/folder[:-1]
                        for folder in open(scene_list_path)]
-
         self.transform = transform
+        self.dataset = dataset
         self.k = skip_frames
-        self.use_frame_index = use_frame_index
-        self.crawl_folders(sequence_length)  # 执行这个method，储存所有 { K, tgt_img, ref_img } 样本对的 self.samples 就准备好了
+        self.with_pseudo_depth = with_pseudo_depth
+        self.with_frame_index = with_frame_index
+        self.crawl_folders(sequence_length)
 
-    # 爬取整个文件夹里的文件：
     def crawl_folders(self, sequence_length):
         # k skip frames
         sequence_set = []
-        demi_length = (sequence_length-1)//2
-        #
-        shifts = list(range(-demi_length * self.k,
-                      demi_length * self.k + 1, self.k))
-        shifts.pop(demi_length)
 
-        # scene = root/scene_n
         for scene in self.scenes:
-            # numpy 获取 root/scene_n/cam.txt
             intrinsics = np.genfromtxt(
                 scene/'cam.txt').astype(np.float32).reshape((3, 3))
 
-            # ['root/scene_1/0000000.jpg', ...]
             imgs = sorted(scene.files('*.jpg'))
 
-            if self.use_frame_index:
-                assert (os.path.exists(scene/'frame_index.txt') == True)
+            if self.with_frame_index:
                 frame_index = [int(index)
                                for index in open(scene/'frame_index.txt')]
                 imgs = [imgs[d] for d in frame_index]
 
+            # 伪深度图
+            if self.with_pseudo_depth:
+                pseudo_depths = sorted((scene/'leres_depth').files('*.png'))
+                if self.with_frame_index:
+                    pseudo_depths = [pseudo_depths[d] for d in frame_index]
+
             if len(imgs) < sequence_length:
                 continue
 
-            # i 大小：len(imgs) - 2 * demi_length
-            for i in range(demi_length * self.k, len(imgs)-demi_length * self.k):
-                # { K，tgt图片路径，ref图片路径 }
+            sample_index_list = generate_sample_index(
+                len(imgs), self.k, sequence_length)
+            for sample_index in sample_index_list:
                 sample = {'intrinsics': intrinsics,
-                          'tgt': imgs[i], 'ref_imgs': []}
+                          'tgt_img': imgs[sample_index['tgt_idx']]}
+                if self.with_pseudo_depth:
+                    sample['tgt_pseudo_depth'] = pseudo_depths[sample_index['tgt_idx']]
 
-                # j 大小：2 * demi_length
-                for j in shifts:
-                    sample['ref_imgs'].append(imgs[i+j])
-
-                # sequence_set 大小：len(imgs) - 2 * demi_length
+                sample['ref_imgs'] = []
+                for j in sample_index['ref_idx']:
+                    sample['ref_imgs'].append(imgs[j])
                 sequence_set.append(sample)
 
         self.samples = sequence_set
 
     def __getitem__(self, index):
         sample = self.samples[index]
-        # 把路径读取成图片
-        tgt_img = load_as_float(sample['tgt'])
+        tgt_img = load_as_float(sample['tgt_img'])
         ref_imgs = [load_as_float(ref_img) for ref_img in sample['ref_imgs']]
-        # 预处理
+
+        if self.with_pseudo_depth:
+            tgt_pseudo_depth = load_as_float(sample['tgt_pseudo_depth'])
+
         if self.transform is not None:
-            imgs, intrinsics = self.transform(
-                [tgt_img] + ref_imgs, np.copy(sample['intrinsics'])
-            )
-            tgt_img = imgs[0]
-            ref_imgs = imgs[1:]
+            if self.with_pseudo_depth:
+                imgs, intrinsics = self.transform(
+                    [tgt_img, tgt_pseudo_depth] + ref_imgs, np.copy(sample['intrinsics']))
+                tgt_img = imgs[0]
+                tgt_pseudo_depth = imgs[1]
+                ref_imgs = imgs[2:]
+            else:
+                imgs, intrinsics = self.transform(
+                    [tgt_img] + ref_imgs, np.copy(sample['intrinsics']))
+                tgt_img = imgs[0]
+                ref_imgs = imgs[1:]
         else:
             intrinsics = np.copy(sample['intrinsics'])
-        return tgt_img, ref_imgs, intrinsics
+
+        if self.with_pseudo_depth:
+            return tgt_img, tgt_pseudo_depth, ref_imgs, intrinsics
+        else:
+            return tgt_img, ref_imgs, intrinsics
 
     def __len__(self):
         return len(self.samples)

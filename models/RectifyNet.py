@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .resnet_encoder import *
 
-
 class RotDecoder(nn.Module):
     def __init__(self, num_ch_enc, num_input_features=1, num_frames_to_predict_for=1, stride=1):
         super(RotDecoder, self).__init__()
@@ -18,11 +17,9 @@ class RotDecoder(nn.Module):
         self.conv_squeeze = nn.Conv2d(self.num_ch_enc[-1], 256, 1)
 
         self.convs_pose = []
-        self.convs_pose.append(
-            nn.Conv2d(num_input_features * 256, 256, 3, stride, 1))
+        self.convs_pose.append(nn.Conv2d(num_input_features * 256, 256, 3, stride, 1))
         self.convs_pose.append(nn.Conv2d(256, 256, 3, stride, 1))
-        self.convs_pose.append(
-            nn.Conv2d(256, 3 * num_frames_to_predict_for, 1))
+        self.convs_pose.append(nn.Conv2d(256, 3 * num_frames_to_predict_for, 1))
 
         self.relu = nn.ReLU()
 
@@ -42,7 +39,7 @@ class RotDecoder(nn.Module):
 
         out = out.mean(3).mean(2)
         rot = out.view(-1, 3)
-
+        
         return rot
 
 
@@ -50,8 +47,7 @@ class RectifyNet(nn.Module):
 
     def __init__(self, num_layers=18, pretrained=True):
         super(RectifyNet, self).__init__()
-        self.encoder = ResnetEncoder(
-            num_layers=num_layers, pretrained=pretrained, num_input_images=2)
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained, num_input_images=2)
         self.decoder = RotDecoder(self.encoder.num_ch_enc)
 
     def init_weights(self):
@@ -59,9 +55,9 @@ class RectifyNet(nn.Module):
 
     def forward(self, img1, img2):
         x = torch.cat([img1, img2], 1)
-
-        b, c, h, w = x.size()
-        x = F.interpolate(x, [h//2, w//2], mode='bilinear', align_corners=True)
+        
+        b,c,h,w = x.size()
+        x = F.interpolate(x, [h//2,w//2], mode='bilinear', align_corners=True)
 
         features = self.encoder(x)
         rot = self.decoder([features])

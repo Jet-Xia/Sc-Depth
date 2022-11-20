@@ -1,18 +1,21 @@
-import numpy as np
-from tqdm import tqdm
-import torch
-from imageio import imread, imwrite
-from path import Path
 import os
 
-from config import get_opts, get_training_size
-
-from SC_Depth import SC_Depth
-from SC_DepthV2 import SC_DepthV2
+import numpy as np
+import torch
+from imageio.v2 import imread, imwrite
+from path import Path
+from tqdm import tqdm
 
 import datasets.custom_transforms as custom_transforms
-
+from config import get_opts, get_training_size
+from SC_Depth import SC_Depth
+from SC_DepthV2 import SC_DepthV2
+from SC_DepthV3 import SC_DepthV3
+from SC_DepthV3p import SC_DepthV3p
 from visualization import *
+
+device = torch.device(
+    "cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
 @torch.no_grad()
@@ -23,11 +26,13 @@ def main():
         system = SC_Depth(hparams)
     elif hparams.model_version == 'v2':
         system = SC_DepthV2(hparams)
-
+    elif hparams.model_version == 'v3':
+        system = SC_DepthV3(hparams)
+    elif hparams.model_version == 'v3p':
+        system = SC_DepthV3p(hparams)
     system = system.load_from_checkpoint(hparams.ckpt_path, strict=False)
-
     model = system.depth_net
-    model.cuda()
+    model.to(device)
     model.eval()
 
     # training size
@@ -62,7 +67,7 @@ def main():
         filename = os.path.splitext(os.path.basename(img_file))[0]
 
         img = imread(img_file).astype(np.float32)
-        tensor_img = inference_transform([img])[0][0].unsqueeze(0).cuda()
+        tensor_img = inference_transform([img])[0][0].unsqueeze(0).to(device)
         pred_depth = model(tensor_img)
 
         if hparams.save_vis:

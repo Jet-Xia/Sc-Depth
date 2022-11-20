@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 from .resnet_encoder import *
 
-
 class PoseDecoder(nn.Module):
     def __init__(self, num_ch_enc, num_input_features=1, num_frames_to_predict_for=1, stride=1):
         super(PoseDecoder, self).__init__()
@@ -17,11 +16,9 @@ class PoseDecoder(nn.Module):
         self.conv_squeeze = nn.Conv2d(self.num_ch_enc[-1], 256, 1)
 
         self.convs_pose = []
-        self.convs_pose.append(
-            nn.Conv2d(num_input_features * 256, 256, 3, stride, 1))
+        self.convs_pose.append(nn.Conv2d(num_input_features * 256, 256, 3, stride, 1))
         self.convs_pose.append(nn.Conv2d(256, 256, 3, stride, 1))
-        self.convs_pose.append(
-            nn.Conv2d(256, 6 * num_frames_to_predict_for, 1))
+        self.convs_pose.append(nn.Conv2d(256, 6 * num_frames_to_predict_for, 1))
 
         self.relu = nn.ReLU()
 
@@ -48,21 +45,19 @@ class PoseDecoder(nn.Module):
 
 class PoseNet(nn.Module):
 
-    def __init__(self, num_layers=18, pretrained=True):
+    def __init__(self, num_layers = 18, pretrained = True):
         super(PoseNet, self).__init__()
-        self.encoder = ResnetEncoder(
-            num_layers=num_layers, pretrained=pretrained, num_input_images=2)
+        self.encoder = ResnetEncoder(num_layers = num_layers, pretrained = pretrained, num_input_images=2)
         self.decoder = PoseDecoder(self.encoder.num_ch_enc)
 
     def init_weights(self):
         pass
 
     def forward(self, img1, img2):
-        x = torch.cat([img1, img2], 1)
+        x = torch.cat([img1,img2],1)
         features = self.encoder(x)
         pose = self.decoder([features])
         return pose
-
 
 if __name__ == "__main__":
 

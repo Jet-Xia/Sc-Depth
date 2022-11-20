@@ -9,25 +9,37 @@ from datasets.test_folder import TestSet
 from losses.loss_functions import compute_errors
 from SC_Depth import SC_Depth
 from SC_DepthV2 import SC_DepthV2
+from SC_DepthV3 import SC_DepthV3
+from SC_DepthV3p import SC_DepthV3p
+from SC_Depth_KD import KD_SC_Depth
 from visualization import *
+
+device = torch.device(
+    "cuda") if torch.cuda.is_available() else torch.device("cpu")
 
 
 @torch.no_grad()
 def main():
     hparams = get_opts()
 
-    # initialize network
     if hparams.model_version == 'v1':
         system = SC_Depth(hparams)
     elif hparams.model_version == 'v2':
         system = SC_DepthV2(hparams)
+    elif hparams.model_version == 'v3':
+        system = SC_DepthV3(hparams)
+    elif hparams.model_version == 'v3p':
+        if hparams.KD == 'yes':
+            system = KD_SC_Depth(hparams)
+        else:
+            system = SC_DepthV3p(hparams)
     system = system.load_from_checkpoint(hparams.ckpt_path, strict=False)
 
     model = system.depth_net
-    model.cuda()
+    model.to(device)
     model.eval()
 
-    # get training resolution
+    # image training size
     training_size = get_training_size(hparams.dataset_name)
 
     # data loader
@@ -52,9 +64,9 @@ def main():
 
     all_errs = []
     for i, (tgt_img, gt_depth) in enumerate(tqdm(test_loader)):
-        pred_depth = model(tgt_img.cuda())
+        pred_depth = model(tgt_img.to(device))
 
-        errs = compute_errors(gt_depth.cuda(), pred_depth,
+        errs = compute_errors(gt_depth.to(device), pred_depth,
                               hparams.dataset_name)
 
         all_errs.append(np.array(errs))

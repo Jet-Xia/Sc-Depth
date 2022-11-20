@@ -1,4 +1,4 @@
-pytorch-lightning==1.7.3
+pytorch-lightning
 matplotlib
 opencv-python
 tqdm
@@ -8,8 +8,9 @@ scipy
 test-tube
 configargparse
 kornia
+wget
 
-# conda create -n sc_depth_env python=3.6
+# conda create -n sc_depth_env python=3.8
 # conda activate sc_depth_env
-# conda install pytorch==1.6.0 torchvision==0.7.0 cudatoolkit=10.2 -c pytorch
+# conda install pytorch torchvision -c pytorch
 # pip install -r requirements.txt

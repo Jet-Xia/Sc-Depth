@@ -1,4 +1,4 @@
-exp_name = kitti_sc-depth_v1
+exp_name = kitti_scv1
 
 dataset_name = kitti
 
@@ -6,6 +6,6 @@ model_version = v1
 resnet_layers = 18
 
 lr = 1e-4
-batch_size = 1
+batch_size = 4
 num_epochs = 100
 epoch_size = 1000

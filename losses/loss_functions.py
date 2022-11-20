@@ -1,10 +1,13 @@
 from __future__ import division
-import torch
-from torch import nn
-import torch.nn.functional as F
+
 import numpy as np
+import torch
+import torch.nn.functional as F
+from torch import nn
 
 from .inverse_warp import inverse_warp
+from .mask_ranking_loss import Mask_Ranking_Loss
+from .normal_ranking_loss import EdgeguidedNormalRankingLoss
 
 device = torch.device(
     "cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -48,161 +51,112 @@ class SSIM(nn.Module):
 
 compute_ssim_loss = SSIM().to(device)
 
+normal_ranking_loss = EdgeguidedNormalRankingLoss().to(device)
+
+mask_ranking_loss = Mask_Ranking_Loss().to(device)
+
 
 def photo_and_geometry_loss(tgt_img, ref_imgs, tgt_depth, ref_depths, intrinsics, poses, poses_inv, hparams):
-    """
-
-    Args:
-        tgt_img: It
-        ref_imgs: [Is1, Is2, Is3.....]
-        tgt_depth: depth_t
-        ref_depths: [depth_s1, depth_s2..... ]
-        intrinsics: K
-        poses:   [ T (t->s1), T (t->s2), T (t->s3).... ]
-        poses_inv:  [ T (s1->t), T (s2->t), T (s3->t).... ]
-        hparams:
-
-    Returns:
-        photo_loss, geometry_loss
-
-    """
 
     diff_img_list = []
     diff_color_list = []
     diff_depth_list = []
     valid_mask_list = []
+    auto_mask_list = []
 
-    # 打包成 每张独立的 ref_img 对应自己的 [(ref_img1, ref_depth1, pose1, pose_inv1), (ref_img2, ref_depth2, pose2, pose_inv2),...]
     for ref_img, ref_depth, pose, pose_inv in zip(ref_imgs, ref_depths, poses, poses_inv):
+        (
+            diff_img_tmp1,
+            diff_color_tmp1,
+            diff_depth_tmp1,
+            valid_mask_tmp1,
+            auto_mask_tmp1
+        ) = compute_pairwise_loss(tgt_img, ref_img, tgt_depth,
+                                  ref_depth, pose, intrinsics,
+                                  hparams)
 
-        # 用 tgt_img 的 depth,pose 算出转换矩阵，给每张 ref_img 作 warping
-        # loss1
-        diff_img_tmp1, diff_color_tmp1, diff_depth_tmp1, valid_mask_tmp1 = compute_pairwise_loss(
-                                                                                tgt_img, ref_img, tgt_depth,
-                                                                                ref_depth, pose, intrinsics,
-                                                                                hparams
-                                                                            )
-        # 用每张 ref_img 的 depth, pose_inv 算出转换矩阵，给 tgt_img 作 warping
-        # loss2
-        diff_img_tmp2, diff_color_tmp2, diff_depth_tmp2, valid_mask_tmp2 = compute_pairwise_loss(
-                                                                                ref_img, tgt_img, ref_depth,
-                                                                                tgt_depth, pose_inv, intrinsics,
-                                                                                hparams
-                                                                            )
+        (
+            diff_img_tmp2,
+            diff_color_tmp2,
+            diff_depth_tmp2,
+            valid_mask_tmp2,
+            auto_mask_tmp2
+        ) = compute_pairwise_loss(ref_img, tgt_img, ref_depth,
+                                  tgt_depth, pose_inv, intrinsics,
+                                  hparams)
 
-        # 用 list 储存所有 ref_img 作 warping 以及 tgt_img 作 warping 算出来的loss和mask都存储起来
-        # [(B,1,H,W), (B,1,H,W), (B,1,H,W).......]
         diff_img_list += [diff_img_tmp1, diff_img_tmp2]
         diff_color_list += [diff_color_tmp1, diff_color_tmp2]
         diff_depth_list += [diff_depth_tmp1, diff_depth_tmp2]
         valid_mask_list += [valid_mask_tmp1, valid_mask_tmp2]
+        auto_mask_list += [auto_mask_tmp1, auto_mask_tmp2]
 
-    # 把上面list里的得到的全部loss都拼接到一个tensor里， [B, n·1, H, W]
     diff_img = torch.cat(diff_img_list, dim=1)
     diff_color = torch.cat(diff_color_list, dim=1)
     diff_depth = torch.cat(diff_depth_list, dim=1)
     valid_mask = torch.cat(valid_mask_list, dim=1)
+    auto_mask = torch.cat(auto_mask_list, dim=1)
 
     # using photo loss to select best match in multiple views
     if not hparams.no_min_optimize:
-        # [B, n·1, H, W] -->  [B, 1, H, W] 找到最小的那个 loss 的索引
         indices = torch.argmin(diff_color, dim=1, keepdim=True)
 
         diff_img = torch.gather(diff_img, 1, indices)
         diff_depth = torch.gather(diff_depth, 1, indices)
         valid_mask = torch.gather(valid_mask, 1, indices)
+        auto_mask = torch.gather(auto_mask, 1, indices)
 
-    #
+    if not hparams.no_auto_mask:
+        valid_mask = valid_mask * auto_mask
+
     photo_loss = mean_on_mask(diff_img, valid_mask)
     geometry_loss = mean_on_mask(diff_depth, valid_mask)
 
-    return photo_loss, geometry_loss
+    if hparams.model_version == 'v3' or hparams.model_version == 'v3p':
+        # get dynamic mask for tgt image
+        dynamic_mask = []
+        for i in range(0, len(diff_depth_list), 2):
+            tmp = diff_depth_list[i]
+            tmp[valid_mask_list[i] < 1] = 0
+            dynamic_mask += [1-tmp]
+
+        dynamic_mask = torch.cat(dynamic_mask, dim=1).mean(dim=1, keepdim=True)
+
+        return photo_loss, geometry_loss, dynamic_mask
+    else:
+        return photo_loss, geometry_loss
 
 
-# 用每张 ref_img 的 depth,pose 给 tgt_img 作 warping，并求 loss
-# 用每张 tgt_img 的 depth,pose 反过来给 ref_img 作 warping，并求 loss
 def compute_pairwise_loss(tgt_img, ref_img, tgt_depth, ref_depth, pose, intrinsic, hparams):
-    """
 
-    Args:
-        tgt_img: It
-        ref_img: 每张独立的 Is
-        tgt_depth: It 的 depth
-        ref_depth: 独立的 Is 的 depth
-        pose:
-        intrinsic:
-        hparams:
-
-    Returns:
-        diff_img, diff_color, diff_depth, valid_mask
-
-    """
-
-    # ^Is ~ It,  ^depth_s ~ depth_t,  m3·P ~ depth_t
     ref_img_warped, projected_depth, computed_depth = inverse_warp(
         ref_img, tgt_depth, ref_depth, pose, intrinsic, padding_mode='zeros')
 
-    """
-        warping 的 Is 的 depth 与 It 的 depth 的差值
-        diff_depth
-    """
-    # || m3·P - ^depth_s ||
-    diff_depth = (computed_depth - projected_depth).abs() / (computed_depth + projected_depth)
+    diff_depth = (computed_depth-projected_depth).abs() / \
+        (computed_depth+projected_depth)
 
-    """
-        用mask去掉空白值，也就是遮挡造成的
-    """
-    # ref_img_warped (^Is ~ It) -> [B,3,H,W]
-    # 对 ^Is 的 RGB 进行求绝对值，求均值，结果大于0.001，就是valid，在 valid_mask 里赋值为 1，否则赋值为 0
-    valid_mask_ref = (ref_img_warped.abs().mean(dim=1, keepdim=True) > 1e-3).float()
-    # 对 It 也求一个 mask
+    # masking zero values
+    valid_mask_ref = (ref_img_warped.abs().mean(
+        dim=1, keepdim=True) > 1e-3).float()
     valid_mask_tgt = (tgt_img.abs().mean(dim=1, keepdim=True) > 1e-3).float()
-    # 结合 It 本身可用性，和 ^Is 得到 mask
     valid_mask = valid_mask_tgt * valid_mask_ref
 
-    """
-        求RGB平均差值
-        diff_color
-    """
-    # || It - ^Is ||
-    # tgt_img: It   [B,3,H,W]
-    # ref_img_warped: ^Is   [B,3,H,W]
-    diff_color = (tgt_img - ref_img_warped).abs().mean(dim=1, keepdim=True)   # [B,1,H,W] RGB通道上的diff平均合并到一起了
+    diff_color = (tgt_img-ref_img_warped).abs().mean(dim=1, keepdim=True)
+    identity_warp_err = (tgt_img-ref_img).abs().mean(dim=1, keepdim=True)
+    auto_mask = (diff_color < identity_warp_err).float()
 
-    if not hparams.no_auto_mask:
-        # || It - Is ||
-        identity_warp_err = (tgt_img - ref_img).abs().mean(dim=1, keepdim=True)
-        # || It - Is ||  >  || It - ^Is || , mask为1
-        # 如果warping后的两张图的差距没有比没有warping前的小，这种情况只可能两者差距相等，说明这部分物体是与相机相对静止的
-        # ignore objects that move at the same velocity as the camera
-        auto_mask = (diff_color < identity_warp_err).float()
-        valid_mask = auto_mask * valid_mask
-
-    """
-        求RGB，SSIM平均差值，并压缩到（0，1）区间
-        diff_img
-    """
-    # 将 It 和 ^Is 的RGB差值压缩到(0,1)
-    diff_img = (tgt_img - ref_img_warped).abs().clamp(0, 1)  # [B,3,H,W] ~ (0,1)
-
-    # SSIM正则化
+    diff_img = (tgt_img-ref_img_warped).abs().clamp(0, 1)
     if not hparams.no_ssim:
         ssim_map = compute_ssim_loss(tgt_img, ref_img_warped)
-        # λ‖Ia(p)−I′a(p)‖ + (1−λ)(1-SSIM(p)) / 2 )
         diff_img = (0.15 * diff_img + 0.85 * ssim_map)
+    diff_img = torch.mean(diff_img, dim=1, keepdim=True)
 
-    # 合并并平均RGB通道的diff
-    diff_img = torch.mean(diff_img, dim=1, keepdim=True)   # [B,1,H,W] ~ (0,1)
-    """
-        对动态物体的loss进行加权
-    """
+    # reduce photometric loss weight for dynamic regions
     if not hparams.no_dynamic_mask:
-        # ^Is 和 It 的 depth 相差越多（证明这里是动态物体或遮挡造成的），权值越小
-        # Ms = 1 - Ddiff
-        weight_mask = (1 - diff_depth).detach()
+        weight_mask = (1-diff_depth).detach()
         diff_img = diff_img * weight_mask
 
-    return diff_img, diff_color, diff_depth, valid_mask
+    return diff_img, diff_color, diff_depth, valid_mask, auto_mask
 
 
 # compute mean value on a binary mask
@@ -267,10 +221,30 @@ def compute_errors(gt, pred, dataset):
         crop_mask[y1:y2, x1:x2] = 1
         max_depth = 80
 
+    if dataset == 'cs':
+        crop_mask = gt[0] != gt[0]
+        crop_mask[256:, 192:1856] = 1
+        max_depth = 80
+
     if dataset == 'nyu':
         crop_mask = gt[0] != gt[0]
         crop = np.array([45, 471, 41, 601]).astype(np.int32)
         crop_mask[crop[0]:crop[1], crop[2]:crop[3]] = 1
+        max_depth = 10
+
+    if dataset == 'bonn':
+        crop_mask = gt[0] != gt[0]
+        crop_mask[:, :] = 1
+        max_depth = 10
+
+    if dataset == 'tum':
+        crop_mask = gt[0] != gt[0]
+        crop_mask[:, :] = 1
+        max_depth = 10
+
+    if dataset == 'scannet':
+        crop_mask = gt[0] != gt[0]
+        crop_mask[:, :] = 1
         max_depth = 10
 
     if dataset == 'ddad':
@@ -278,7 +252,7 @@ def compute_errors(gt, pred, dataset):
         crop_mask[:, :] = 1
         max_depth = 200
 
-    min_depth = 0.1
+    min_depth = 1e-3
     for current_gt, current_pred in zip(gt, pred):
         valid = (current_gt > min_depth) & (current_gt < max_depth)
         valid = valid & crop_mask

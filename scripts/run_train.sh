@@ -1,12 +1,14 @@
 # absolute path that contains all datasets
-DATA_ROOT=/media/bjw/Disk/release_depth_data
+DATA_ROOT=/media/bjw/disk1/depth_data/
 
-# # kitti
-# DATASET=$DATA_ROOT/kitti
-# CONFIG=configs/v1/kitti_raw.txt
+export CUDA_VISIBLE_DEVICES=0
 
-# nyu
-DATASET=$DATA_ROOT/nyu
-CONFIG=configs/v2/nyu.txt
+# kitti
+# python train.py --config configs/v1/kitti_raw.txt --dataset_dir $DATA_ROOT/kitti
 
-python train.py --config $CONFIG --dataset_dir $DATASET
+# # ddad
+# python train.py --config configs/ddad.txt
+
+
+# # nyu
+python train.py --config configs/v2/nyu.txt --dataset_dir $DATA_ROOT/nyu

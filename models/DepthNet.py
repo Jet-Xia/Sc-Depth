@@ -3,11 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .resnet_encoder import ResnetEncoder
 
-
 class ConvBlock(nn.Module):
     """Layer to perform a convolution followed by ELU
     """
-
     def __init__(self, in_channels, out_channels):
         super(ConvBlock, self).__init__()
 
@@ -18,7 +16,6 @@ class ConvBlock(nn.Module):
         out = self.conv(x)
         out = self.nonlin(out)
         return out
-
 
 class Conv3x3(nn.Module):
     """Layer to pad and convolve input
@@ -38,12 +35,10 @@ class Conv3x3(nn.Module):
         out = self.conv(out)
         return out
 
-
 def upsample(x):
     """Upsample input tensor by a factor of 2
     """
     return F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
-
 
 class DepthDecoder(nn.Module):
     def __init__(self, num_ch_enc, scales=range(4), num_output_channels=1, use_skips=True):
@@ -79,8 +74,7 @@ class DepthDecoder(nn.Module):
             self.upconvs1.append(ConvBlock(num_ch_in, num_ch_out))
 
         for cnt, s in enumerate(self.scales):
-            self.dispconvs.append(
-                Conv3x3(self.num_ch_dec[s], self.num_output_channels))
+            self.dispconvs.append(Conv3x3(self.num_ch_dec[s], self.num_output_channels))
 
             if s in range(4, -1, -1):
                 self.i_to_scaleIdx_conversion[s] = cnt
@@ -109,21 +103,18 @@ class DepthDecoder(nn.Module):
             x = self.upconvs1[cnt](x)
             if i in self.scales:
                 idx = self.i_to_scaleIdx_conversion[i]
-                disp = self.alpha * \
-                    self.sigmoid(self.dispconvs[idx](x)) + self.beta
+                disp = self.alpha * self.sigmoid(self.dispconvs[idx](x)) + self.beta
                 depth = 1.0 / disp
                 self.outputs.append(depth)
 
         self.outputs = self.outputs[::-1]
         return self.outputs
 
-
 class DepthNet(nn.Module):
 
     def __init__(self, num_layers=18, pretrained=True):
         super(DepthNet, self).__init__()
-        self.encoder = ResnetEncoder(
-            num_layers=num_layers, pretrained=pretrained, num_input_images=1)
+        self.encoder = ResnetEncoder(num_layers=num_layers, pretrained=pretrained, num_input_images=1)
         self.decoder = DepthDecoder(self.encoder.num_ch_enc)
 
     def init_weights(self):
@@ -133,7 +124,6 @@ class DepthNet(nn.Module):
         features = self.encoder(x)
         outputs = self.decoder(features)
         return outputs[0]
-
 
 if __name__ == "__main__":
 

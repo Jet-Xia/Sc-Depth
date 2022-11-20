@@ -1,3 +1,4 @@
+from math import floor
 import numpy as np
 import torch
 from pytorch_lightning import LightningModule
@@ -8,6 +9,7 @@ from models.DepthNet import DepthNet
 from models.PoseNet import PoseNet
 from models.RectifyNet import RectifyNet
 from visualization import *
+from kornia.filters import gaussian_blur2d
 
 
 class SC_DepthV2(LightningModule):
@@ -28,7 +30,6 @@ class SC_DepthV2(LightningModule):
         rot3_list = []
         rot3_gt_list = []
         ref_imgs_warped = []
-
         for ref_img in ref_imgs:
             rot1 = self.rectify_net(tgt_img, ref_img)
             rot_warped_img = inverse_rotation_warp(ref_img, rot1, intrinsics)
@@ -81,21 +82,43 @@ class SC_DepthV2(LightningModule):
     def training_step(self, batch, batch_idx):
         tgt_img, ref_imgs, intrinsics = batch
 
-        # network forward
-        tgt_depth = self.depth_net(tgt_img)
+        # rectification
         ref_imgs_warped, loss_rc, loss_rt, rot_before, rot_after = self.rectify_imgs(
             tgt_img, ref_imgs, intrinsics)
 
+        # visualization for rectification
+        if self.global_step % 100 == 0:
+            vis_img = visualize_image(tgt_img[0])  # (3, H, W)
+            vis_ref = visualize_image(ref_imgs[0][0])  # (3, H, W)
+            vis_warp = visualize_image(ref_imgs_warped[0][0])  # (3, H, W)
+            vis_all = torch.cat([vis_img, vis_ref, vis_warp],
+                                dim=1).unsqueeze(0)  # (1, 3, 3*H, W)
+            self.logger.experiment.add_images(
+                'train/tgt_ref_warp', vis_all, self.global_step)
+
+        # network forward
+        tgt_depth = self.depth_net(tgt_img)
         ref_depths = [self.depth_net(im) for im in ref_imgs_warped]
         poses = [self.pose_net(tgt_img, im) for im in ref_imgs_warped]
         poses_inv = [self.pose_net(im, tgt_img) for im in ref_imgs_warped]
 
-        # compute loss
+        # loss weights
         w1 = self.hparams.hparams.photo_weight
         w2 = self.hparams.hparams.geometry_weight
         w3 = self.hparams.hparams.smooth_weight
         w4 = self.hparams.hparams.rot_c_weight
         w5 = self.hparams.hparams.rot_t_weight
+
+        # bluring images for computing corase-to-fine loss
+        if self.global_step < 50000:
+            K_sizes = [11, 9, 7, 5, 3]
+            k_size = K_sizes[floor(self.global_step / 10000)]
+            sigma = 0.3 * ((k_size - 1) * 0.5 - 1) + 0.8
+            tgt_img = gaussian_blur2d(
+                tgt_img, [k_size, k_size], [sigma, sigma])
+            ref_imgs_warped = [gaussian_blur2d(
+                img, [k_size, k_size], [sigma, sigma])
+                for img in ref_imgs_warped]
 
         loss_1, loss_2 = LossF.photo_and_geometry_loss(tgt_img, ref_imgs_warped, tgt_depth, ref_depths,
                                                        intrinsics, poses, poses_inv, self.hparams.hparams)
@@ -112,16 +135,6 @@ class SC_DepthV2(LightningModule):
         self.log('train/rot_triplet_loss', loss_rt)
         self.log('train/rot_before', rot_before)
         self.log('train/rot_after', rot_after)
-
-        # add visualization for rectification
-        if self.global_step % 100 == 0:
-            vis_img = visualize_image(tgt_img[0])  # (3, H, W)
-            vis_ref = visualize_image(ref_imgs[0][0])  # (3, H, W)
-            vis_warp = visualize_image(ref_imgs_warped[0][0])  # (3, H, W)
-            vis_all = torch.cat([vis_img, vis_ref, vis_warp],
-                                dim=1).unsqueeze(0)  # (1, 3, 3*H, W)
-            self.logger.experiment.add_images(
-                'train/tgt_ref_warp', vis_all, self.global_step)
 
         return loss
 
